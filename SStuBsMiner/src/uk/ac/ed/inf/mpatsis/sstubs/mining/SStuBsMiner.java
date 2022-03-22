@@ -268,6 +268,7 @@ public class SStuBsMiner {
 				int refactoredChanges = 0;
 				
 				final String commitSHA1 = ObjectId.toString( commit.getId() );
+				System.out.println("Processing commit : " + commitSHA1);
 				final String parentCommitSHA1 = ObjectId.toString( commit.getParent(0).getId() );
 				final String[] split = repositoryDir.split( "/" );
 				final String projectName = split[split.length - 1];
@@ -322,848 +323,95 @@ public class SStuBsMiner {
 				for ( DiffEntry diff : diffs ) {
 					boolean countedJavaFile = false;
 
-					ObjectId newFileId = diff.getNewId().toObjectId();
-					ObjectLoader newLoader;
-					String newFileContent = null;
-					ObjectId oldFileId = diff.getOldId().toObjectId();
-					ObjectLoader oldLoader;
-					String oldFileContent = null;
-					try {
+					// If a new Java file was added in this commit that might have affected the bug fix.
+					// We do not care about non-Java files.
+					if ( diff.getChangeType().compareTo( ChangeType.ADD ) == 0 && diff.getNewPath().endsWith( ".java" ) ) {
+						nonOneLiners = true;
+						out.reset();
+						break;
+					}
+					// If a Java file was deleted in this commit that might have affected the bug fix. Is this an issue though???
+					else if ( diff.getChangeType().compareTo( ChangeType.DELETE ) == 0 && diff.getOldPath().endsWith( ".java" )) {
+						nonOneLiners = true;
+						out.reset();
+						break;
+					}
+					else if ( df.toFileHeader(diff).toEditList().size() > 100 ) {
+						nonOneLiners = true;
+						out.reset();
+						break;
+					}
+					// Modification on a Java file.
+					else if ( diff.getChangeType().compareTo( ChangeType.MODIFY ) == 0
+							&& diff.getNewPath().endsWith( ".java" ) ) {
+						out.reset();
+						df.format( diff );
+
+//						System.out.println(diff.get);
+						ObjectId newFileId = diff.getNewId().toObjectId();
+						ObjectLoader newLoader;
+						String newFileContent = null;
+						ObjectId oldFileId = diff.getOldId().toObjectId();
+						ObjectLoader oldLoader;
+						String oldFileContent = null;
+
 						newLoader = repo.open( newFileId );
 						newFileContent = new String( newLoader.getBytes(), "UTF-8" );
 
 						oldLoader = repo.open( oldFileId );
 						oldFileContent = new String( oldLoader.getBytes(), "UTF-8" );
 
-						// If a new Java file was added in this commit that might have affected the bug fix.
-						// We do not care about non-Java files.
-						if ( diff.getChangeType().compareTo( ChangeType.ADD ) == 0 && diff.getNewPath().endsWith( ".java" ) ) {
-							nonOneLiners = true;
-							out.reset();
-							break;
-						}
-						// If a Java file was deleted in this commit that might have affected the bug fix. Is this an issue though???
-						else if ( diff.getChangeType().compareTo( ChangeType.DELETE ) == 0 && diff.getOldPath().endsWith( ".java" )) {
-							nonOneLiners = true;
-							out.reset();
-							break;
-						}
-						else if ( df.toFileHeader(diff).toEditList().size() > 100 ) {
-							nonOneLiners = true;
-							out.reset();
-							break;
-						}
-						// Modification on a Java file.
-						else if ( diff.getChangeType().compareTo( ChangeType.MODIFY ) == 0
-								&& diff.getNewPath().endsWith( ".java" ) ) {
-							out.reset();
-							df.format( diff );
 
-							if ( out.toString().length() > 5000000 ) break;
-							List<EditType> editTypes = processParseEdits( diff, out );
-							boolean noMultistatenentChanges = noMultistatenentChanges( editTypes );
+						if ( out.toString().length() > 5000000 ) break;
+						List<EditType> editTypes = processParseEdits( diff, out );
+						boolean noMultistatenentChanges = noMultistatenentChanges( editTypes );
 
-							ArrayList<CompilationUnit> ASTs = (ArrayList<CompilationUnit>) getASTs( diff, editTypes );
+						ArrayList<CompilationUnit> ASTs = (ArrayList<CompilationUnit>) getASTs( diff, editTypes );
 
-							if ( noMultistatenentChanges( editTypes ) && !onlyCommentEdits( editTypes ) &&
-									hasSingleStatementEdit( editTypes ) ) {
-								nonCommentChanges = true;
-								refactoredChanges += spotRefactoringsSecondPass( ASTs, diff, out, repo );
+						if ( noMultistatenentChanges( editTypes ) && !onlyCommentEdits( editTypes ) &&
+								hasSingleStatementEdit( editTypes ) ) {
+							nonCommentChanges = true;
+							refactoredChanges += spotRefactoringsSecondPass( ASTs, diff, out, repo );
 
-								ASTNode originalAST = ASTs.get(0);
-								for ( int t = 1; t < ASTs.size(); t++ ) {
-									// Skip if the ASTs are equal
-									if ( ASTDifferenceLocator.equals( originalAST, ASTs.get(t) ) ) {
-										nonOneLiners = true; // check me
-										out.reset();
-										break;
+							ASTNode originalAST = ASTs.get(0);
+							for ( int t = 1; t < ASTs.size(); t++ ) {
+								// Skip if the ASTs are equal
+								if ( ASTDifferenceLocator.equals( originalAST, ASTs.get(t) ) ) {
+									nonOneLiners = true; // check me
+									out.reset();
+									break;
+								}
+								else { // Check if the AST pair fits any of the SStuB patterns.
+									// The ast's are different. Now find the first node that they differ by dfs.
+									SimpleImmutableEntry<ASTNode, ASTNode> nodesDiff =
+											ASTDifferenceLocator.getFirstDifferentNode( ASTs.get(t), originalAST );
+
+									final String REFACTORING_LINE = diff.getNewPath() + ":" + ASTs.get(t).getLineNumber( nodesDiff.getKey().getStartPosition() );
+									if ( refactoringLines.contains( REFACTORING_LINE ) ) {
+//										System.out.println( "This is a refactoring line. Skipping it" );
+										continue;
 									}
-									else { // Check if the AST pair fits any of the SStuB patterns.
-										// The ast's are different. Now find the first node that they differ by dfs.
-										SimpleImmutableEntry<ASTNode, ASTNode> nodesDiff =
-												ASTDifferenceLocator.getFirstDifferentNode( ASTs.get(t), originalAST );
 
-										final String REFACTORING_LINE = diff.getNewPath() + ":" + ASTs.get(t).getLineNumber( nodesDiff.getKey().getStartPosition() );
-										if ( refactoringLines.contains( REFACTORING_LINE ) ) {
-	//										System.out.println( "This is a refactoring line. Skipping it" );
-											continue;
-										}
-
-										final String commitFile = diff.getNewPath();
-										final String patch = out.toString( "UTF-8" );
-
-										ASTNode newASTNode = nodesDiff.getKey();
-										ASTNode oldASTNode = nodesDiff.getValue();
-										MinedBug minedBug = new MinedBug(commitSHA1, parentCommitSHA1, commitFile, patch, projectName,
-												 ((CompilationUnit) oldASTNode.getRoot()).getLineNumber( oldASTNode.getStartPosition() ),
-												 oldASTNode.getStartPosition(), oldASTNode.getLength(),
-												 ((CompilationUnit) newASTNode.getRoot()).getLineNumber( newASTNode.getStartPosition() ),
-												 newASTNode.getStartPosition(), newASTNode.getLength(), oldASTNode.toString().replaceAll( "\n", " " ),
-												newASTNode.toString().replaceAll( "\n", " " ), oldFileContent, newFileContent);
-										currentMinedBugs.add( minedBug );
-
-										if ( nodesDiff.getKey() instanceof Expression &&
-												nodesDiff.getValue() instanceof Expression ) {
-											Expression newNode = (Expression) nodesDiff.getKey();
-											Expression oldNode = (Expression) nodesDiff.getValue();
-
-											// Does the Expression pair fit the ChangeUnaryOperator template?
-											if ( ASTDifferenceLocator.isChangeUnaryOperator( newNode, oldNode) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_UNARY_OPERATOR,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-												continue;
-											}
-										}
-
-										// Change identifier instance.
-										if ( (nodesDiff.getKey() instanceof SimpleName &&
-												nodesDiff.getValue() instanceof ThisExpression) ||
-												(nodesDiff.getKey() instanceof ThisExpression &&
-												nodesDiff.getValue() instanceof SimpleName) ) {
-											Expression newNode = (Expression) nodesDiff.getKey();
-											Expression oldNode = (Expression) nodesDiff.getValue();
-
-											final int oldNodeStartChar = oldNode.getStartPosition();
-											final int oldNodeLength = oldNode.getLength();
-											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-											final int newNodeStartChar = newNode.getStartPosition();
-											final int newNodeLength = newNode.getLength();
-											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-											final String nodeTypeString = oldNode.getClass().getSimpleName();
-											final String nodeBeforeString = oldNode.getParent().toString().replaceAll( "\n", " " );
-											final String nodeAfterString = newNode.getParent().toString().replaceAll( "\n", " " );
-
-											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-													commitFile, BugType.CHANGE_IDENTIFIER,
-													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-													newLineNum, newNodeStartChar, newNodeLength,
-													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-											currentMinedStubs.add( minedSStuB );
-
-											if ( !countedJavaFile ) {
-												modifiedJavaFiles++;
-												countedJavaFile = true;
-											}
-											oneLinersFitTemplate++;
-											currentSStuBPatches.add( out.toString() );
-											fitsTemplate = true;
-											continue;
-										}
-
-										// AST pair of Constructor calls.
-										if ( nodesDiff.getKey().getNodeType() == ASTNode.CLASS_INSTANCE_CREATION &&
-												nodesDiff.getValue().getNodeType() == ASTNode.CLASS_INSTANCE_CREATION ) {
-											ClassInstanceCreation newNode = ( (ClassInstanceCreation) nodesDiff.getKey() );
-											ClassInstanceCreation oldNode = ( (ClassInstanceCreation) nodesDiff.getValue() );
-											// Is constructor call pair that fits same function swap arguments?
-											if ( ASTDifferenceLocator.isSwapArguments( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.SWAP_ARGUMENTS,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Is constructor call pair that fits same function deleted arguments?
-											else if ( ASTDifferenceLocator.isCallOverloadedMethodDeletedArgs( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.OVERLOAD_METHOD_DELETED_ARGS,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Is constructor call pair that fits same function more arguments?
-											else if ( ASTDifferenceLocator.isCallOverloadedMethodMoreArgs( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.OVERLOAD_METHOD_MORE_ARGS,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Spots instances of swap boolean literal inside a constructor call.
-											else if ( ASTDifferenceLocator.isSwapBooleanLiteral( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.SWAP_BOOLEAN_LITERAL,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// AST pair of Method Invocations.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.METHOD_INVOCATION &&
-												nodesDiff.getValue().getNodeType() == ASTNode.METHOD_INVOCATION ) {
-											MethodInvocation newNode = ( (MethodInvocation) nodesDiff.getKey() );
-											MethodInvocation oldNode = ( (MethodInvocation) nodesDiff.getValue() );
-
-											// Is method invocation pair that fits same function swap arguments?
-											if ( ASTDifferenceLocator.isSwapArguments( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.SWAP_ARGUMENTS, patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength, nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Is method invocation pair that fits wrong function name?
-											else if ( ASTDifferenceLocator.isDifferentMethodSameArgs( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.DIFFERENT_METHOD_SAME_ARGS,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Is method invocation pair that fits same function change caller?
-											else if ( ASTDifferenceLocator.isChangeCallerInFunctionCall( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_CALLER_IN_FUNCTION_CALL,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Is method invocation pair that fits same function less arguments?
-											else if ( ASTDifferenceLocator.isCallOverloadedMethodDeletedArgs( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.OVERLOAD_METHOD_DELETED_ARGS,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Is method invocation pair that fits same function more arguments?
-											else if ( ASTDifferenceLocator.isCallOverloadedMethodMoreArgs( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.OVERLOAD_METHOD_MORE_ARGS,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Spots instances of swap boolean literal inside a method invocation.
-											else if ( ASTDifferenceLocator.isSwapBooleanLiteral( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.SWAP_BOOLEAN_LITERAL,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// Spots instances of swap boolean literal.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.BOOLEAN_LITERAL &&
-												nodesDiff.getValue().getNodeType() == ASTNode.BOOLEAN_LITERAL ){
-											BooleanLiteral newNode = ( (BooleanLiteral) nodesDiff.getKey() );
-											BooleanLiteral oldNode = ( (BooleanLiteral) nodesDiff.getValue() );
-
-											if ( ASTDifferenceLocator.isSwapBooleanLiteral( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getParent().getStartPosition();
-												final int oldNodeLength = oldNode.getParent().getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getParent().getStartPosition();
-												final int newNodeLength = newNode.getParent().getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getParent().getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getParent().toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.getParent().toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.SWAP_BOOLEAN_LITERAL,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-										}
-										// Pair of InfixExpressions
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.INFIX_EXPRESSION &&
-												nodesDiff.getValue().getNodeType() == ASTNode.INFIX_EXPRESSION ) {
-											InfixExpression newNode = ( (InfixExpression) nodesDiff.getKey() );
-											InfixExpression oldNode = ( (InfixExpression) nodesDiff.getValue() );
-
-											// Spots instances of change binary operator for InfixExpression pairs.
-											if ( ASTDifferenceLocator.isChangeOperator( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_OPERATOR,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Spots instances of change operand for InfixExpression pairs.
-											else if ( ASTDifferenceLocator.isChangeOperand( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_OPERAND,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Checks if it is an instance of more specific if/while
-											else if ( ASTDifferenceLocator.isMoreSpecificIf( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.MORE_SPECIFIC_IF,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Checks if it is an instance of less specific if/while
-											else if ( ASTDifferenceLocator.isLessSpecificIf( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.LESS_SPECIFIC_IF,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// Pair of variable declaration statements.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.VARIABLE_DECLARATION_STATEMENT &&
-												nodesDiff.getValue().getNodeType() == ASTNode.VARIABLE_DECLARATION_STATEMENT ) {
-											VariableDeclarationStatement newNode = ( (VariableDeclarationStatement) nodesDiff.getKey() );
-											VariableDeclarationStatement oldNode = ( (VariableDeclarationStatement) nodesDiff.getValue() );
-
-											// Checks if it is an instance of change modifier.
-											if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getModifiers() + "";
-												final String nodeAfterString = newNode.getModifiers() + "";
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_MODIFIER,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// Pair of field declarations.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.FIELD_DECLARATION &&
-												nodesDiff.getValue().getNodeType() == ASTNode.FIELD_DECLARATION ) {
-											FieldDeclaration newNode = ( (FieldDeclaration) nodesDiff.getKey() );
-											FieldDeclaration oldNode = ( (FieldDeclaration) nodesDiff.getValue() );
-
-											// Checks if it is an instance of change modifier.
-											if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getModifiers() + "";
-												final String nodeAfterString = newNode.getModifiers() + "";
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_MODIFIER,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// Pair of Method Declarations.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.METHOD_DECLARATION &&
-												nodesDiff.getValue().getNodeType() == ASTNode.METHOD_DECLARATION ) {
-											MethodDeclaration newNode = ( (MethodDeclaration) nodesDiff.getKey() );
-											MethodDeclaration oldNode = ( (MethodDeclaration) nodesDiff.getValue() );
-											// Checks if it is an instance of change modifier.
-											if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
-
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getModifiers() + "";
-												final String nodeAfterString = newNode.getModifiers() + "";
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_MODIFIER,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Checks if the method declaration pair fits the missing throws exception pattern.
-											else if ( ASTDifferenceLocator.isAddThrowsException( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getModifiers() + "";
-												final String nodeAfterString = newNode.getModifiers() + "";
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.ADD_THROWS_EXCEPTION,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											// Checks if the method declaration pair fits the delete throws exception pattern.
-											else if ( ASTDifferenceLocator.isDeleteThrowsException( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getModifiers() + "";
-												final String nodeAfterString = newNode.getModifiers() + "";
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.DELETE_THROWS_EXCEPTION,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// Pair of Class Declaration nodes.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.TYPE_DECLARATION &&
-												nodesDiff.getValue().getNodeType() == ASTNode.TYPE_DECLARATION ) {
-											TypeDeclaration newNode = ( (TypeDeclaration) nodesDiff.getKey() );
-											TypeDeclaration oldNode = ( (TypeDeclaration) nodesDiff.getValue() );
-											// Checks if it is an instance of change modifier
-											if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getModifiers() + "";
-												final String nodeAfterString = newNode.getModifiers() + "";
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_MODIFIER,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-											else {
-												allOneLinerFilesFitTemplate = false;
-											}
-										}
-										// Pair of number literal nodes.
-										else if ( nodesDiff.getKey().getNodeType() == ASTNode.NUMBER_LITERAL &&
-												nodesDiff.getValue().getNodeType() == ASTNode.NUMBER_LITERAL ) {
-											NumberLiteral newNode = (NumberLiteral) nodesDiff.getKey();
-											NumberLiteral oldNode = (NumberLiteral) nodesDiff.getValue();
-											// Check whether the pair fits the change numeric literal pattern.
-											if ( ASTDifferenceLocator.isChangeNumeral( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getParent().getStartPosition();
-												final int oldNodeLength = oldNode.getParent().getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getParent().getStartPosition();
-												final int newNodeLength = newNode.getParent().getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getParent().getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.getParent().toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.getParent().toString().replaceAll( "\n", " " );
-
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.CHANGE_NUMERAL,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-
-												currentMinedStubs.add( minedSStuB );
-
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-											}
-										}
-										else {
-											allOneLinerFilesFitTemplate = false;
-										}
-
-										// Changed identifier instance
-										if ( ASTDifferenceLocator.isChangeIdentifier( nodesDiff.getKey(), nodesDiff.getValue() ) ) {
-											ASTNode newNode = nodesDiff.getKey();
-											ASTNode oldNode = nodesDiff.getValue();
-
-											if ( oldNode.getClass().getSimpleName().equals( "SimpleType" ) ) {
-												oldNode = oldNode.getParent();
-												newNode = newNode.getParent();
-											}
-
+									final String commitFile = diff.getNewPath();
+									final String patch = out.toString( "UTF-8" );
+
+									ASTNode newASTNode = nodesDiff.getKey();
+									ASTNode oldASTNode = nodesDiff.getValue();
+									MinedBug minedBug = new MinedBug(commitSHA1, parentCommitSHA1, commitFile, patch, projectName,
+											 ((CompilationUnit) oldASTNode.getRoot()).getLineNumber( oldASTNode.getStartPosition() ),
+											 oldASTNode.getStartPosition(), oldASTNode.getLength(),
+											 ((CompilationUnit) newASTNode.getRoot()).getLineNumber( newASTNode.getStartPosition() ),
+											 newASTNode.getStartPosition(), newASTNode.getLength(), oldASTNode.toString().replaceAll( "\n", " " ),
+											newASTNode.toString().replaceAll( "\n", " " ), oldFileContent, newFileContent);
+									currentMinedBugs.add( minedBug );
+
+									if ( nodesDiff.getKey() instanceof Expression &&
+											nodesDiff.getValue() instanceof Expression ) {
+										Expression newNode = (Expression) nodesDiff.getKey();
+										Expression oldNode = (Expression) nodesDiff.getValue();
+
+										// Does the Expression pair fit the ChangeUnaryOperator template?
+										if ( ASTDifferenceLocator.isChangeUnaryOperator( newNode, oldNode) ) {
 											final int oldNodeStartChar = oldNode.getStartPosition();
 											final int oldNodeLength = oldNode.getLength();
 											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
@@ -1175,7 +423,7 @@ public class SStuBsMiner {
 											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
 
 											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-													commitFile, BugType.CHANGE_IDENTIFIER,
+													commitFile, BugType.CHANGE_UNARY_OPERATOR,
 													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
 													newLineNum, newNodeStartChar, newNodeLength,
 													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
@@ -1190,86 +438,838 @@ public class SStuBsMiner {
 											fitsTemplate = true;
 											continue;
 										}
+									}
 
+									// Change identifier instance.
+									if ( (nodesDiff.getKey() instanceof SimpleName &&
+											nodesDiff.getValue() instanceof ThisExpression) ||
+											(nodesDiff.getKey() instanceof ThisExpression &&
+											nodesDiff.getValue() instanceof SimpleName) ) {
+										Expression newNode = (Expression) nodesDiff.getKey();
+										Expression oldNode = (Expression) nodesDiff.getValue();
 
-										if ( nodesDiff.getValue() instanceof Expression &&
-												nodesDiff.getKey() instanceof InfixExpression ) {
-											InfixExpression newNode = (InfixExpression) nodesDiff.getKey();
-											Expression oldNode = (Expression) nodesDiff.getValue();
+										final int oldNodeStartChar = oldNode.getStartPosition();
+										final int oldNodeLength = oldNode.getLength();
+										final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+										final int newNodeStartChar = newNode.getStartPosition();
+										final int newNodeLength = newNode.getLength();
+										final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+										final String nodeTypeString = oldNode.getClass().getSimpleName();
+										final String nodeBeforeString = oldNode.getParent().toString().replaceAll( "\n", " " );
+										final String nodeAfterString = newNode.getParent().toString().replaceAll( "\n", " " );
 
-											// Checks if it is an instance of more specific if/while
-											if ( ASTDifferenceLocator.isMoreSpecificIf( newNode, oldNode ) &&
-													nodesDiff.getKey().getNodeType() != ASTNode.INFIX_EXPRESSION ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+										MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+												commitFile, BugType.CHANGE_IDENTIFIER,
+												patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+												newLineNum, newNodeStartChar, newNodeLength,
+												nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+										currentMinedStubs.add( minedSStuB );
 
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.MORE_SPECIFIC_IF,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-												currentMinedStubs.add( minedSStuB );
+										if ( !countedJavaFile ) {
+											modifiedJavaFiles++;
+											countedJavaFile = true;
+										}
+										oneLinersFitTemplate++;
+										currentSStuBPatches.add( out.toString() );
+										fitsTemplate = true;
+										continue;
+									}
 
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-												continue;
+									// AST pair of Constructor calls.
+									if ( nodesDiff.getKey().getNodeType() == ASTNode.CLASS_INSTANCE_CREATION &&
+											nodesDiff.getValue().getNodeType() == ASTNode.CLASS_INSTANCE_CREATION ) {
+										ClassInstanceCreation newNode = ( (ClassInstanceCreation) nodesDiff.getKey() );
+										ClassInstanceCreation oldNode = ( (ClassInstanceCreation) nodesDiff.getValue() );
+										// Is constructor call pair that fits same function swap arguments?
+										if ( ASTDifferenceLocator.isSwapArguments( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.SWAP_ARGUMENTS,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
 											}
-											// Checks if it is an instance of less specific if/while
-											else if ( ASTDifferenceLocator.isLessSpecificIf( newNode, oldNode ) ) {
-												final int oldNodeStartChar = oldNode.getStartPosition();
-												final int oldNodeLength = oldNode.getLength();
-												final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
-												final int newNodeStartChar = newNode.getStartPosition();
-												final int newNodeLength = newNode.getLength();
-												final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
-												final String nodeTypeString = oldNode.getClass().getSimpleName();
-												final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
-												final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Is constructor call pair that fits same function deleted arguments?
+										else if ( ASTDifferenceLocator.isCallOverloadedMethodDeletedArgs( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
 
-												MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
-														commitFile, BugType.LESS_SPECIFIC_IF,
-														patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
-														newLineNum, newNodeStartChar, newNodeLength,
-														nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
-												currentMinedStubs.add( minedSStuB );
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.OVERLOAD_METHOD_DELETED_ARGS,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
 
-												if ( !countedJavaFile ) {
-													modifiedJavaFiles++;
-													countedJavaFile = true;
-												}
-												oneLinersFitTemplate++;
-												currentSStuBPatches.add( out.toString() );
-												fitsTemplate = true;
-												continue;
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
 											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Is constructor call pair that fits same function more arguments?
+										else if ( ASTDifferenceLocator.isCallOverloadedMethodMoreArgs( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.OVERLOAD_METHOD_MORE_ARGS,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Spots instances of swap boolean literal inside a constructor call.
+										else if ( ASTDifferenceLocator.isSwapBooleanLiteral( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.SWAP_BOOLEAN_LITERAL,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// AST pair of Method Invocations.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.METHOD_INVOCATION &&
+											nodesDiff.getValue().getNodeType() == ASTNode.METHOD_INVOCATION ) {
+										MethodInvocation newNode = ( (MethodInvocation) nodesDiff.getKey() );
+										MethodInvocation oldNode = ( (MethodInvocation) nodesDiff.getValue() );
+
+										// Is method invocation pair that fits same function swap arguments?
+										if ( ASTDifferenceLocator.isSwapArguments( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.SWAP_ARGUMENTS, patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength, nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Is method invocation pair that fits wrong function name?
+										else if ( ASTDifferenceLocator.isDifferentMethodSameArgs( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.DIFFERENT_METHOD_SAME_ARGS,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Is method invocation pair that fits same function change caller?
+										else if ( ASTDifferenceLocator.isChangeCallerInFunctionCall( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_CALLER_IN_FUNCTION_CALL,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Is method invocation pair that fits same function less arguments?
+										else if ( ASTDifferenceLocator.isCallOverloadedMethodDeletedArgs( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.OVERLOAD_METHOD_DELETED_ARGS,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Is method invocation pair that fits same function more arguments?
+										else if ( ASTDifferenceLocator.isCallOverloadedMethodMoreArgs( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.OVERLOAD_METHOD_MORE_ARGS,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Spots instances of swap boolean literal inside a method invocation.
+										else if ( ASTDifferenceLocator.isSwapBooleanLiteral( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.SWAP_BOOLEAN_LITERAL,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// Spots instances of swap boolean literal.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.BOOLEAN_LITERAL &&
+											nodesDiff.getValue().getNodeType() == ASTNode.BOOLEAN_LITERAL ){
+										BooleanLiteral newNode = ( (BooleanLiteral) nodesDiff.getKey() );
+										BooleanLiteral oldNode = ( (BooleanLiteral) nodesDiff.getValue() );
+
+										if ( ASTDifferenceLocator.isSwapBooleanLiteral( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getParent().getStartPosition();
+											final int oldNodeLength = oldNode.getParent().getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getParent().getStartPosition();
+											final int newNodeLength = newNode.getParent().getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getParent().getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getParent().toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.getParent().toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.SWAP_BOOLEAN_LITERAL,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+									}
+									// Pair of InfixExpressions
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.INFIX_EXPRESSION &&
+											nodesDiff.getValue().getNodeType() == ASTNode.INFIX_EXPRESSION ) {
+										InfixExpression newNode = ( (InfixExpression) nodesDiff.getKey() );
+										InfixExpression oldNode = ( (InfixExpression) nodesDiff.getValue() );
+
+										// Spots instances of change binary operator for InfixExpression pairs.
+										if ( ASTDifferenceLocator.isChangeOperator( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_OPERATOR,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Spots instances of change operand for InfixExpression pairs.
+										else if ( ASTDifferenceLocator.isChangeOperand( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_OPERAND,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Checks if it is an instance of more specific if/while
+										else if ( ASTDifferenceLocator.isMoreSpecificIf( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.MORE_SPECIFIC_IF,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Checks if it is an instance of less specific if/while
+										else if ( ASTDifferenceLocator.isLessSpecificIf( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.LESS_SPECIFIC_IF,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// Pair of variable declaration statements.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.VARIABLE_DECLARATION_STATEMENT &&
+											nodesDiff.getValue().getNodeType() == ASTNode.VARIABLE_DECLARATION_STATEMENT ) {
+										VariableDeclarationStatement newNode = ( (VariableDeclarationStatement) nodesDiff.getKey() );
+										VariableDeclarationStatement oldNode = ( (VariableDeclarationStatement) nodesDiff.getValue() );
+
+										// Checks if it is an instance of change modifier.
+										if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getModifiers() + "";
+											final String nodeAfterString = newNode.getModifiers() + "";
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_MODIFIER,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// Pair of field declarations.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.FIELD_DECLARATION &&
+											nodesDiff.getValue().getNodeType() == ASTNode.FIELD_DECLARATION ) {
+										FieldDeclaration newNode = ( (FieldDeclaration) nodesDiff.getKey() );
+										FieldDeclaration oldNode = ( (FieldDeclaration) nodesDiff.getValue() );
+
+										// Checks if it is an instance of change modifier.
+										if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getModifiers() + "";
+											final String nodeAfterString = newNode.getModifiers() + "";
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_MODIFIER,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// Pair of Method Declarations.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.METHOD_DECLARATION &&
+											nodesDiff.getValue().getNodeType() == ASTNode.METHOD_DECLARATION ) {
+										MethodDeclaration newNode = ( (MethodDeclaration) nodesDiff.getKey() );
+										MethodDeclaration oldNode = ( (MethodDeclaration) nodesDiff.getValue() );
+										// Checks if it is an instance of change modifier.
+										if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
+
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getModifiers() + "";
+											final String nodeAfterString = newNode.getModifiers() + "";
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_MODIFIER,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Checks if the method declaration pair fits the missing throws exception pattern.
+										else if ( ASTDifferenceLocator.isAddThrowsException( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getModifiers() + "";
+											final String nodeAfterString = newNode.getModifiers() + "";
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.ADD_THROWS_EXCEPTION,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										// Checks if the method declaration pair fits the delete throws exception pattern.
+										else if ( ASTDifferenceLocator.isDeleteThrowsException( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getModifiers() + "";
+											final String nodeAfterString = newNode.getModifiers() + "";
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.DELETE_THROWS_EXCEPTION,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// Pair of Class Declaration nodes.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.TYPE_DECLARATION &&
+											nodesDiff.getValue().getNodeType() == ASTNode.TYPE_DECLARATION ) {
+										TypeDeclaration newNode = ( (TypeDeclaration) nodesDiff.getKey() );
+										TypeDeclaration oldNode = ( (TypeDeclaration) nodesDiff.getValue() );
+										// Checks if it is an instance of change modifier
+										if ( ASTDifferenceLocator.isChangeModifier( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getModifiers() + "";
+											final String nodeAfterString = newNode.getModifiers() + "";
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_MODIFIER,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+										else {
+											allOneLinerFilesFitTemplate = false;
+										}
+									}
+									// Pair of number literal nodes.
+									else if ( nodesDiff.getKey().getNodeType() == ASTNode.NUMBER_LITERAL &&
+											nodesDiff.getValue().getNodeType() == ASTNode.NUMBER_LITERAL ) {
+										NumberLiteral newNode = (NumberLiteral) nodesDiff.getKey();
+										NumberLiteral oldNode = (NumberLiteral) nodesDiff.getValue();
+										// Check whether the pair fits the change numeric literal pattern.
+										if ( ASTDifferenceLocator.isChangeNumeral( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getParent().getStartPosition();
+											final int oldNodeLength = oldNode.getParent().getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getParent().getStartPosition();
+											final int newNodeLength = newNode.getParent().getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getParent().getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.getParent().toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.getParent().toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.CHANGE_NUMERAL,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+										}
+									}
+									else {
+										allOneLinerFilesFitTemplate = false;
+									}
+
+									// Changed identifier instance
+									if ( ASTDifferenceLocator.isChangeIdentifier( nodesDiff.getKey(), nodesDiff.getValue() ) ) {
+										ASTNode newNode = nodesDiff.getKey();
+										ASTNode oldNode = nodesDiff.getValue();
+
+										if ( oldNode.getClass().getSimpleName().equals( "SimpleType" ) ) {
+											oldNode = oldNode.getParent();
+											newNode = newNode.getParent();
+										}
+
+										final int oldNodeStartChar = oldNode.getStartPosition();
+										final int oldNodeLength = oldNode.getLength();
+										final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+										final int newNodeStartChar = newNode.getStartPosition();
+										final int newNodeLength = newNode.getLength();
+										final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+										final String nodeTypeString = oldNode.getClass().getSimpleName();
+										final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+										final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+										MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+												commitFile, BugType.CHANGE_IDENTIFIER,
+												patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+												newLineNum, newNodeStartChar, newNodeLength,
+												nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+										currentMinedStubs.add( minedSStuB );
+
+										if ( !countedJavaFile ) {
+											modifiedJavaFiles++;
+											countedJavaFile = true;
+										}
+										oneLinersFitTemplate++;
+										currentSStuBPatches.add( out.toString() );
+										fitsTemplate = true;
+										continue;
+									}
+
+
+									if ( nodesDiff.getValue() instanceof Expression &&
+											nodesDiff.getKey() instanceof InfixExpression ) {
+										InfixExpression newNode = (InfixExpression) nodesDiff.getKey();
+										Expression oldNode = (Expression) nodesDiff.getValue();
+
+										// Checks if it is an instance of more specific if/while
+										if ( ASTDifferenceLocator.isMoreSpecificIf( newNode, oldNode ) &&
+												nodesDiff.getKey().getNodeType() != ASTNode.INFIX_EXPRESSION ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.MORE_SPECIFIC_IF,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+											continue;
+										}
+										// Checks if it is an instance of less specific if/while
+										else if ( ASTDifferenceLocator.isLessSpecificIf( newNode, oldNode ) ) {
+											final int oldNodeStartChar = oldNode.getStartPosition();
+											final int oldNodeLength = oldNode.getLength();
+											final int oldLineNum = ((CompilationUnit) oldNode.getRoot()).getLineNumber( oldNodeStartChar );
+											final int newNodeStartChar = newNode.getStartPosition();
+											final int newNodeLength = newNode.getLength();
+											final int newLineNum = ((CompilationUnit) newNode.getRoot()).getLineNumber( newNodeStartChar );
+											final String nodeTypeString = oldNode.getClass().getSimpleName();
+											final String nodeBeforeString = oldNode.toString().replaceAll( "\n", " " );
+											final String nodeAfterString = newNode.toString().replaceAll( "\n", " " );
+
+											MinedSStuB minedSStuB = new MinedSStuB( commitSHA1, parentCommitSHA1,
+													commitFile, BugType.LESS_SPECIFIC_IF,
+													patch, projectName, oldLineNum, oldNodeStartChar, oldNodeLength,
+													newLineNum, newNodeStartChar, newNodeLength,
+													nodeBeforeString, nodeAfterString, oldFileContent, newFileContent);
+											currentMinedStubs.add( minedSStuB );
+
+											if ( !countedJavaFile ) {
+												modifiedJavaFiles++;
+												countedJavaFile = true;
+											}
+											oneLinersFitTemplate++;
+											currentSStuBPatches.add( out.toString() );
+											fitsTemplate = true;
+											continue;
 										}
 									}
 								}
+							}
 
-							}
-							else if ( !noMultistatenentChanges( editTypes ) ) {
-								nonOneLiners = true;
-								out.reset();
-								break;
-							}
 						}
-						commitPatches = out.toString();
-						out.reset();
-					} catch (IOException e) {
-						e.printStackTrace();
+						else if ( !noMultistatenentChanges( editTypes ) ) {
+							nonOneLiners = true;
+							out.reset();
+							break;
+						}
 					}
+					commitPatches = out.toString();
+					out.reset();
 				}
 				
 				if ( !nonOneLiners && nonCommentChanges ) {
@@ -1335,10 +1335,10 @@ public class SStuBsMiner {
 		try {
 			newLoader = repo.open( newFileId );
 			newFileContent = new String( newLoader.getBytes(), "UTF-8" );
-			
 			oldLoader = repo.open( oldFileId );
 			oldFileContent = new String( oldLoader.getBytes(), "UTF-8" );
 		} catch (IOException e) {
+			System.out.println("Stack trace spotrefactoring");
 			e.printStackTrace();
 		}
 		
@@ -1624,6 +1624,7 @@ public class SStuBsMiner {
 			oldLoader = repo.open( oldFileId );
 			oldFileContent = new String( oldLoader.getBytes(), "UTF-8" );
 		} catch (IOException e) {
+			System.out.println("Stack trace spotrefactoring second pass");
 			e.printStackTrace();
 		}
 		
@@ -1982,6 +1983,7 @@ public class SStuBsMiner {
 			}
 		} 
 		catch ( IOException e ) {
+			System.out.println("Stack trace processParseEdits");
 			e.printStackTrace();
 		}
 		
